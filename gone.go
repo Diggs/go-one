@@ -64,9 +64,8 @@ func (g *Gone) startDataServer() error {
 	go func() {
 		for {
 			data, _ := socket.RecvBytes(0)
-			glog.Infof("Received data: %v", string(data))
-			socket.Send("ack", 0)
-			// TODO Route data to appropriate Runner
+      socket.Send("ack", 0)
+      g.Data <- data
 		}
 	}()
 
@@ -78,6 +77,8 @@ func (g *Gone) Extend() error {
 }
 
 func (g *Gone) SendData(data []byte) error {
+
+  glog.Infof("Looking up lock holder for %v...", g.id)
 
 	ip, err := g.lock.GetValue()
 	if err != nil {
@@ -92,11 +93,7 @@ func (g *Gone) SendData(data []byte) error {
 	}
 	socket.Connect(ip)
 
-	// TODO encapsulate runner info in to message
 	socket.SendBytes(data, 0)
-
-	glog.Info("Sent data, waiting for reply")
-
 	socket.Recv(0)
 
 	return nil

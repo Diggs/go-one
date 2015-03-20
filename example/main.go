@@ -19,7 +19,7 @@ func Run(g *gone.Gone) {
 			glog.Debugf("Exit signalled; exiting runner.")
 			return
 		case data := <- g.Data:
-			glog.Debugf("Received some data: %v", data)
+			glog.Debugf("Received data: %v", data)
 		case <-time.After(25 * time.Second):
 			err := g.Extend()
 			if err != nil {
@@ -35,21 +35,9 @@ func main() {
 	glog.SetSeverity("debug")
 	defer glog.Flush()
 
-	g, err := gone.RunOne("tcp://127.0.0.1:6380", "irc:#connectrix:irc.freenode.net", Run, redisLock)
+	g, err := gone.RunOne("tcp://127.0.0.1:6381", "irc:#connectrix:irc.freenode.net", Run, redisLock)
 	if err != nil {
 		panic(err.Error())
-	}
-
-	if os.Getenv("T") == "1" {
-		go func() {
-			time.Sleep(3 * time.Second)
-			glog.Info("Sending data")
-			err := g.SendData([]byte("hello"))
-			glog.Info("Sent data")
-			if err != nil {
-				glog.Debugf("Failed to send data: %v", err)
-			}
-		}()
 	}
 
 	for {
