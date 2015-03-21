@@ -108,5 +108,10 @@ func (r *RedisLock) Unlock() {
 }
 
 func (r *RedisLock) GetValue() (string, error) {
-	return r.client.Cmd("get", r.lockId).Str()
+	// redis_lock GetValue() will be a bulk reply when lock doesn't exist - should turn in to appropriate error
+	reply := r.client.Cmd("get", r.lockId)
+	if reply.Err != nil {
+		return "", reply.Err
+	}
+	return reply.Str()
 }
