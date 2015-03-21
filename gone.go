@@ -1,125 +1,147 @@
 package gone
 
 import (
+	"fmt"
 	"github.com/diggs/glog"
 	zmq "github.com/pebbe/zmq4"
-	"time"
+	"sync"
 )
 
-type Runner func(*Gone)
-
 type Gone struct {
-	id          string
 	ip          string
-	runner      Runner
 	lockFactory LockFactory
-	lock        GoneLock
 	zmqContext  *zmq.Context
-	Data        chan []byte
-	Exit        chan bool
+	// sockets keyed by ip
+	zmqSockets      map[string]*zmq.Socket
+	zmqSocketsMutex sync.Mutex
+	// runners keyed by id
+	runners      map[string]*GoneRunner
+	runnersMutex sync.Mutex
+	server       *goneServer
 }
 
 func (g *Gone) Close() {
-	close(g.Exit)
+	// TODO Close all runners and server
 }
 
-func (g *Gone) buildLock() error {
-	lock, err := g.lockFactory(g.id, g.ip)
-	if err != nil {
-		return err
-	}
-	g.lock = lock
-	return nil
-}
+func (g *Gone) getReqSocket(ip string) (*zmq.Socket, error) {
+	g.zmqSocketsMutex.Lock()
+	defer g.zmqSocketsMutex.Unlock()
 
-func (g *Gone) enterRunLoop() {
-	for {
-		select {
-		case <-g.Exit:
-			glog.Debugf("Exit signalled; exiting run loop.")
-			return
-		default:
-			g.run()
-			time.Sleep(5 * time.Second)
+	if socket, exists := g.zmqSockets[ip]; exists {
+		return socket, nil
+	} else {
+		socket, err := g.zmqContext.NewSocket(zmq.REQ)
+		if err != nil {
+			return nil, err
 		}
+		err = socket.Connect(ip)
+		if err != nil {
+			return nil, err
+		}
+		g.zmqSockets[ip] = socket
+		return socket, nil
 	}
 }
 
-func (g *Gone) run() {
-	err := g.lock.Lock()
-	if err != nil {
+func (g *Gone) buildLock(id string) (GoneLock, error) {
+	return g.lockFactory(id, g.ip)
+}
+
+func (g *Gone) dispatchData(id string, data []byte) {
+	runner := g.runners[id]
+	if runner == nil {
+		glog.Errorf("Unknown runner id: %v", id)
 		return
 	}
-	defer g.lock.Unlock()
-	g.runner(g)
+	runner.Data <- data
 }
 
-func (g *Gone) startDataServer() error {
-	socket, err := g.zmqContext.NewSocket(zmq.REP)
-	if err != nil {
-		return err
-	}
-	socket.Bind(g.ip)
-
-	go func() {
-		for {
-			data, _ := socket.RecvBytes(0)
-      socket.Send("ack", 0)
-      g.Data <- data
+func (g *Gone) enterServerDispatchLoop() {
+	for {
+		select {
+		case <-g.server.Exit:
+			glog.Debug("Exit signalled; exiting dispatch loop.")
+			return
+		case data := <-g.server.Data:
+			glog.Debugf("Received data: %v bytes", len(data))
+			payload, err := decodePayload(data)
+			if err != nil {
+				glog.Errorf("Unable to decode payload: %v", err)
+				continue
+			}
+			go g.dispatchData(payload.Id, payload.Data)
 		}
-	}()
-
-	return nil
+	}
 }
 
-func (g *Gone) Extend() error {
-	return g.lock.Extend()
-}
+func (g *Gone) SendData(id string, data []byte) error {
+	g.runnersMutex.Lock()
+	defer g.runnersMutex.Unlock()
 
-func (g *Gone) SendData(data []byte) error {
+	runner := g.runners[id]
+	if runner == nil {
+		return fmt.Errorf("Unknown runner id: %v", id)
+	}
 
-  glog.Infof("Looking up lock holder for %v...", g.id)
+	glog.Infof("Looking up lock holder for %v...", id)
 
-	ip, err := g.lock.GetValue()
+	ip, err := runner.Lock.GetValue()
 	if err != nil {
 		return err
 	}
 
-	glog.Infof("Sending data for %v to %v", g.id, ip)
+	glog.Infof("Sending data for %v to %v", id, ip)
 
-	socket, err := g.zmqContext.NewSocket(zmq.REQ)
+	socket, err := g.getReqSocket(ip)
 	if err != nil {
 		return err
 	}
-	socket.Connect(ip)
 
-	socket.SendBytes(data, 0)
+	payload := gonePayload{Id: id, Data: data}
+	bytes, err := encodePayload(&payload)
+	if err != nil {
+		return err
+	}
+
+	socket.SendBytes(bytes, 0)
 	socket.Recv(0)
 
 	return nil
 }
 
-func RunOne(ip string, id string, runner Runner, lockFactory LockFactory) (*Gone, error) {
-	g := Gone{}
-	g.ip = ip
-	g.id = id
-	g.runner = runner
-	g.lockFactory = lockFactory
-	g.Data = make(chan []byte)
-	g.Exit = make(chan bool)
+func (g *Gone) RunOne(id string, runHandler RunHandler) (*GoneRunner, error) {
+	g.runnersMutex.Lock()
+	defer g.runnersMutex.Unlock()
+	if runner, exists := g.runners[id]; exists {
+		return runner, nil
+	}
+
+	lock, err := g.buildLock(id)
+	if err != nil {
+		return nil, err
+	}
+
+	g.runners[id] = newGoneRunner(id, runHandler, lock, g)
+	return g.runners[id], nil
+}
+
+func NewGone(ip string, lockFactory LockFactory) (*Gone, error) {
 	context, err := zmq.NewContext()
 	if err != nil {
 		return nil, err
 	}
+	server, err := NewGoneServer(ip, context)
+	if err != nil {
+		return nil, err
+	}
+	g := Gone{}
+	g.ip = ip
+	g.lockFactory = lockFactory
+	g.server = server
 	g.zmqContext = context
-	err = g.buildLock()
-	if err != nil {
-		return nil, err
-	}
-	err = g.startDataServer()
-	if err != nil {
-		return nil, err
-	}
-	go g.enterRunLoop()
+	g.zmqSockets = make(map[string]*zmq.Socket)
+	g.runners = make(map[string]*GoneRunner)
+	go g.enterServerDispatchLoop()
 	return &g, nil
 }

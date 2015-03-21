@@ -5,23 +5,22 @@ import (
 	"github.com/diggs/gone"
 	"net"
 	"time"
-	"os"
 )
 
 func redisLock(id string, value string) (gone.GoneLock, error) {
 	return gone.NewRedisLock(&net.TCPAddr{Port: 6379}, id, value)
 }
 
-func Run(g *gone.Gone) {
+func runner(r *gone.GoneRunner) {
 	for {
 		select {
-		case <- g.Exit:
+		case <- r.Exit:
 			glog.Debugf("Exit signalled; exiting runner.")
 			return
-		case data := <- g.Data:
+		case data := <- r.Data:
 			glog.Debugf("Received data: %v", data)
 		case <-time.After(25 * time.Second):
-			err := g.Extend()
+			err := r.Extend()
 			if err != nil {
 				glog.Debugf("Failed to extend lock; exiting runner: %v", err)
 				return
@@ -35,14 +34,24 @@ func main() {
 	glog.SetSeverity("debug")
 	defer glog.Flush()
 
-	g, err := gone.RunOne("tcp://127.0.0.1:6381", "irc:#connectrix:irc.freenode.net", Run, redisLock)
+	g, err := gone.NewGone("tcp://127.0.0.1:6381", redisLock)
 	if err != nil {
 		panic(err.Error())
 	}
 
+	r, err := g.RunOne("irc:#connectrix:irc.freenode.net", runner)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	err = r.SendData([]byte("hello world"))
+	if err != nil {
+		glog.Debugf("Send err: %v", err)
+	}
+
 	for {
 		select {
-		case <- g.Exit:
+		case <- r.Exit:
 			glog.Info("Runner quit.")
 			return
 		}
