@@ -20,8 +20,17 @@ type goneDispatcher struct {
 }
 
 func (d *goneDispatcher) Close() {
-	// close all runners
-	// close all sockets
+	d.runnersMutex.Lock()
+	defer d.runnersMutex.Unlock()
+	for _, runner := range d.runners {
+		runner.Close()
+	}
+
+	d.zmqSocketsMutex.Lock()
+	defer d.zmqSocketsMutex.Unlock()
+	for _, socket := range d.zmqSockets {
+		socket.Close()
+	}
 }
 
 func (d *goneDispatcher) GetRunner(id string) *GoneRunner {
@@ -67,14 +76,12 @@ func (d *goneDispatcher) SendData(id string, data []byte) error {
 	}
 
 	glog.Infof("Looking up lock holder for %v...", id)
-
 	ip, err := runner.Lock.GetValue()
 	if err != nil {
 		return err
 	}
 
 	glog.Infof("Sending data for %v to %v", id, ip)
-
 	socket, err := d.getReqSocket(ip)
 	if err != nil {
 		return err

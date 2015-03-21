@@ -13,7 +13,8 @@ type Gone struct {
 }
 
 func (g *Gone) Close() {
-	// TODO Close dispatcher, server and context
+	g.server.Close()
+	g.dispatcher.Close()
 }
 
 func (g *Gone) SendData(id string, data []byte) error {
