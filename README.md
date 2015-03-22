@@ -10,57 +10,47 @@ Additionally, ZeroMQ is used so that any node can send data to the Go routine, r
 
 ## Use cases
 
-Gone was written specifically to solve the problem where a stateful connection is needed to talk to an external service or API (e.g. a persistent socket connection) in a horizontally scaled system. Take this simple use case:
+Gone was written specifically to solve the problem where a stateful connection is needed to talk to an external service or API (e.g. a persistent socket connection) in a horizontally scaled system. Take these simple use cases:
 
 ```
-load_balancer -> (N) x web_server -> irc_chat_room
+1) load_balancer -> N x web_server -> irc_chat_room
+2) message_queue -> N x background_worker -> irc_chat_room
 ```
 
-An incoming web request is converted to a message that needs to be sent to an IRC chat room. IRC is stateful, that is you are persistently "connected". In a naive implementation one might open and close a connection to the IRC chat room for each message, but that would result in every one else in the room seeing your service constantly connect and disconnect. Additionally, the IRC server might begin to refuse connections or rate limit your service. 
+A message needs to be sent to an IRC chat room. IRC is stateful, that is you are persistently "connected". In a naive implementation one might open and close a connection to the IRC chat room for each message, but that would result in every one else in the room seeing your service constantly connect and disconnect. Additionally, the IRC server might begin to refuse connections or rate limit your service.
 
-This might be solved by introducing a message queue and a background worker for handling message delivery:
-
-```
-load_balancer -> (N) x web_server -> message_queue -> background_worker -> irc_chat_room
-```
-
-But now not only is your architecture more complicated, your horizontally scaled service isn't looking so horizontal any more.  If the background_worker process dies, or even worse the machine it runs on, there are no nodes standing by to reestablish the connection.
-
-Gone solves this by enabling the first architecture displayed above to operate as though it looked like the second, more complicated architecture.
+go-one solves this by enabling automatic negotiation, routing and failover for a Go routine across a cluster of nodes.
 
 ## Usage
 
-Instantiate a new ```Gone``` and specify the ```IP``` address of the current machine (that should be routable by other instances), the ```port``` the process should listen on for messages from other instances, a ```unique key``` that identifies the Go routine that is being managed, a handler for the Go routine, and finally the locking mechanism to use (currently only Redis is supported).
+See the ```examples``` directory for a full working example.
 
-The handler is the most interesting piece, it can read the ```gone.Data``` channel to receive messages from any instance for processing. It is also responsible for letting Gone know it is healthy by calling ```gone.Extend()``` within the lock expiry period (30 seconds by default).
+Instantiate a new ```Gone``` and specify the ```IP``` address of the current machine (that should be routable by other instances), the ```port``` the process should listen on for messages from other instances, and finally the locking mechanism to use (currently only Redis is supported).
+
+Next, call the ```RunOne``` function, passing in a unique identifier for the routine that will be run, as well as a ```RunHandler``` that go-one will ensure is always running on one node in the cluster.
+
+The ```RunHandler``` is the most interesting item, it can read the ```runner.Data``` channel to receive messages from any instance for processing. It is also responsible for letting Gone know it is healthy by calling ```runner.Extend()``` within the lock expiry period (30 seconds by default). If the lock expires because the run handler has not extended it, the handler will quit and a new one will spawn on an arbitrary node.
 
 See below for a full example: 
 
 ```go
-package main
-
-import (
-  "github.com/diggs/glog"
-  "github.com/diggs/gone"
-  "net"
-  "time"
-  "os"
-)
-
 func redisLock(id string, value string) (gone.GoneLock, error) {
   return gone.NewRedisLock(&net.TCPAddr{Port: 6379}, id, value)
 }
 
-func Run(g *gone.Gone) {
+func runner(r *gone.GoneRunner) {
+  // Do some application-specific setup e.g. connect to stateful service
+  ticker := time.NewTicker(25 * time.Second).C
   for {
     select {
-    case <- g.Exit:
+    case <- r.Exit:
       glog.Debugf("Exit signalled; exiting runner.")
       return
-    case data := <- g.Data:
+    case data := <- r.Data:
       glog.Debugf("Received data: %v", string(data))
-    case <-time.After(25 * time.Second):
-      err := g.Extend()
+      // Do something application-specific with the data
+    case <-ticker:
+      err := r.Extend()
       if err != nil {
         glog.Debugf("Failed to extend lock; exiting runner: %v", err)
         return
@@ -69,21 +59,17 @@ func Run(g *gone.Gone) {
   }
 }
 
-func main() {
-  g, err := gone.RunOne("tcp://127.0.0.1:6381", "irc:#connectrix:irc.freenode.net", Run, redisLock)
-  if err != nil {
-    panic(err.Error())
-  }
-
-  for {
-    select {
-    case <- g.Exit:
-      glog.Info("Runner quit.")
-      return
-    }
-  }
+g, err := gone.NewGone("tcp://127.0.0.1:6381", redisLock)
+if err != nil {
+  panic(err.Error())
 }
 
+r, err := g.RunOne("unique_identifier", runner)
+if err != nil {
+  panic(err.Error())
+}
+
+r.SendData([]byte("hello world"))
 ```
 
 To send data to the handler function, regardless of which instance it is running on, use the ```gone.SendData``` function. Gone will route the data to the handler function on the node it is currently executing on.
