@@ -5,6 +5,7 @@ import (
 	"github.com/diggs/glog"
 	zmq "github.com/pebbe/zmq4"
 	"sync"
+	"runtime/debug"
 	"time"
 )
 
@@ -45,28 +46,29 @@ func (d *goneDispatcher) AddRunner(id string, runner *GoneRunner) {
 	d.runners[id] = runner
 }
 
-func (d *goneDispatcher) sendDataWithTimeout(bytes []byte, socket *zmq.Socket) <-chan error {
-	done := make(chan error)
+func (d *goneDispatcher) sendDataWithRecovery(bytes []byte, socket *zmq.Socket) (<-chan error, <-chan error) {
+	errChan := make(chan error)
+	panicChan := make(chan error)
 	go func() {
-		// defer func() {
-		//    if err := recover(); err != nil {
-		//        done <- err
-		//    }
-		//   }()
-
+		defer func() {
+			if r := recover(); r != nil {
+				glog.Errorf("Recovered in sendDataWithRecovery: %v \n %s", r, debug.Stack())
+				panicChan <- fmt.Errorf("Panicked in sendDataWithRecovery. Remote lock holder possibly offline.")
+			}
+		}()
 		_, err := socket.SendBytes(bytes, 0)
 		if err != nil {
-			done <- err
+			errChan <- err
 			return
 		}
 		_, err = socket.Recv(0)
 		if err != nil {
-			done <- err
+			errChan <- err
 			return
 		}
-		done <- nil
+		errChan <- nil
 	}()
-	return done
+	return panicChan, errChan
 }
 
 func (d *goneDispatcher) SendData(id string, data []byte) error {
@@ -93,14 +95,27 @@ func (d *goneDispatcher) SendData(id string, data []byte) error {
 		return err
 	}
 
-	c := d.sendDataWithTimeout(bytes, socket)
+	panicChan, errChan := d.sendDataWithRecovery(bytes, socket)
 	select {
-	case err = <-c:
+	case err = <-errChan:
+		// Handle normal send/recv errors, no need to recycle socket.
+		if err != nil {
+			return err
+		}
+	case err = <-panicChan:
+		// By observation pebbe/zmq4 sometimes panics when the remote socket closes during the recv() loop.
+		// Recycle the socket so that the next time the remote process comes online and takes the lock
+		// we will establish a new connection.
+		go d.destroyReqSocket(ip)
 		if err != nil {
 			return err
 		}
 	case <-time.After(10 * time.Second):
-		d.destroyReqSocket(ip)
+		// Zeromq can deadlock on REQ/REP socket pairs where the REP goes missing.
+		// (due to remote server going offline between REQ and REP steps, for example).
+		// There's no easy way to detect this so we use a simple timeout to infer it (which will get it wrong sometimes)
+		// Recycle the socket so we establish a new connection on the next send.
+		go d.destroyReqSocket(ip)
 		return fmt.Errorf("Timed out sending data")
 	}
 
@@ -139,30 +154,41 @@ func (d *goneDispatcher) getReqSocket(ip string) (*zmq.Socket, error) {
 	d.zmqSocketsMutex.Lock()
 	defer d.zmqSocketsMutex.Unlock()
 
-	if socket, exists := d.zmqSockets[ip]; exists {
-		return socket, nil
-	} else {
-		socket, err := d.zmqContext.NewSocket(zmq.REQ)
-		if err != nil {
-			return nil, err
-		}
-		err = socket.Connect(ip)
-		if err != nil {
-			return nil, err
-		}
-		d.zmqSockets[ip] = socket
+	socket := d.zmqSockets[ip]
+	if socket != nil {
+		glog.Debugf("Using existing socket: %v", socket.String())
 		return socket, nil
 	}
+
+	socket, err := d.zmqContext.NewSocket(zmq.REQ)
+	if err != nil {
+		return nil, err
+	}
+	err = socket.Connect(ip)
+	if err != nil {
+		return nil, err
+	}
+	d.zmqSockets[ip] = socket
+	glog.Debugf("Created new socket: %v", socket.String())
+	return socket, nil
 }
 
 func (d *goneDispatcher) destroyReqSocket(ip string) {
+	defer func() {
+		if r := recover(); r != nil {
+			glog.Warningf("Recovered in destroyReqSocket: %v", r)
+		}
+		glog.Debugf("Destroyed socket for %v: %v", ip, d.zmqSockets[ip].String())
+		d.zmqSockets[ip] = nil
+	}()
 	d.zmqSocketsMutex.Lock()
 	defer d.zmqSocketsMutex.Unlock()
+	// TODO Attempting to close a socket while it's waiting on a recv() causes a panic
+	// in cgo that doesn't seem to be recoverable
 	// socket := d.zmqSockets[ip]
 	// if socket != nil {
 	// 	socket.Close()
 	// }
-	d.zmqSockets[ip] = nil
 }
 
 func newDispatcher(server *goneServer, zmqContext *zmq.Context) *goneDispatcher {

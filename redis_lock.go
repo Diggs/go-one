@@ -42,7 +42,7 @@ func (r *RedisLock) expiry() int {
 }
 
 func (r *RedisLock) logErr(action string, err string) {
-	glog.Debugf("Failed to %v lock %v:%v: %v", action, r.lockId, r.lockVal, err)
+	glog.Debugf("Failed to %v lock %v: %v", action, r.lockId, err)
 }
 
 func (r *RedisLock) Lock() error {

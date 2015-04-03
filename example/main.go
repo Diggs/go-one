@@ -4,6 +4,7 @@ import (
 	"github.com/diggs/glog"
 	"github.com/diggs/gone"
 	"net"
+	"os"
 	"time"
 )
 
@@ -15,10 +16,10 @@ func runner(r *gone.GoneRunner) {
 	ticker := time.NewTicker(25 * time.Second).C
 	for {
 		select {
-		case <- r.Exit:
+		case <-r.Exit:
 			glog.Debugf("Exit signalled; exiting runner.")
 			return
-		case data := <- r.Data:
+		case data := <-r.Data:
 			glog.Debugf("Received data: %v", string(data))
 		case <-ticker:
 			err := r.Extend()
@@ -35,7 +36,7 @@ func main() {
 	glog.SetSeverity("debug")
 	defer glog.Flush()
 
-	g, err := gone.NewGone("tcp://127.0.0.1:6381", redisLock)
+	g, err := gone.NewGone("tcp://127.0.0.1:"+os.Getenv("PORT"), redisLock)
 	if err != nil {
 		panic(err.Error())
 	}
@@ -57,7 +58,7 @@ func main() {
 
 	for {
 		select {
-		case <- r.Exit:
+		case <-r.Exit:
 			glog.Info("Runner quit.")
 			return
 		}

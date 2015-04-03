@@ -12,6 +12,10 @@ type Gone struct {
 	dispatcher  *goneDispatcher
 }
 
+func (g *Gone) buildLock(id string) (GoneLock, error) {
+	return g.lockFactory(id, g.ip)
+}
+
 func (g *Gone) Close() {
 	g.server.Close()
 	g.dispatcher.Close()
@@ -19,10 +23,6 @@ func (g *Gone) Close() {
 
 func (g *Gone) SendData(id string, data []byte) error {
 	return g.dispatcher.SendData(id, data)
-}
-
-func (g *Gone) buildLock(id string) (GoneLock, error) {
-	return g.lockFactory(id, g.ip)
 }
 
 func (g *Gone) RunOne(id string, runHandler RunHandler) (*GoneRunner, error) {

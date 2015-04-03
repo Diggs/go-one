@@ -30,6 +30,7 @@ func (s *goneServer) Close() {
 	go func() {
 		s.waitGroup.Wait()
 		close(s.Data)
+		s.socket.Close()
 	}()
 }
 
